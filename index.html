@@ -64,7 +64,7 @@ function main() {
   function fmt(x, nd) { return (+x).toFixed(nd).replace(/\.?0+$/, ""); }
 
   var raw = (location.hash || "").replace(/^#/, "");
-  var data = { dia: 0, name: "", weight: null, ops: [] };
+  var data = { dia: 0, name: "", weight: null, ops: [], spring: null };
   if (/^w2-/.test(raw)) {
     // v2: ใช้แค่ตัวอักษร ตัวเลข และ - (ส่งผ่านลิงก์ claude.ai ได้)  w2-d<Øx100>-g<gx100>-N<hex PN>-S<Lx100>-B<deg x10>-R<Rx100>-T<roll x10, m=ลบ>
     raw.split("-").forEach(function (it) {
@@ -77,6 +77,11 @@ function main() {
       else if (k === "B") data.ops.push({ t: "B", ang: num(10), R: 0, roll: 0 });
       else if (k === "R" && data.ops.length) data.ops[data.ops.length - 1].R = num(100);
       else if (k === "T" && data.ops.length) data.ops[data.ops.length - 1].roll = num(10);
+      // สปริง: Y ชนิด(1 กด 2 ดึง 3 บิด) O โตนอก C จำนวนขด F ความยาวอิสระ E ปลาย H ห่วง X ยืดห่วง P/Q ขา L ซ้าย W ความยาวลวด
+      else if ("YOCFEHXPQLW".indexOf(k) >= 0) {
+        data.spring = data.spring || {};
+        data.spring[k] = num(({ O: 100, C: 100, F: 100, X: 100, P: 100, Q: 100, W: 100 })[k] || 1);
+      }
     });
   } else {
     var frag = ""; try { frag = decodeURIComponent(raw); } catch (e) {}
@@ -89,7 +94,7 @@ function main() {
       else if (k === "B") { var a = v.split(",").map(parseFloat); data.ops.push({ t: "B", ang: a[0], R: a[1], roll: a[2] || 0 }); }
     });
   }
-  if (!data.dia || !data.ops.length) {
+  if (!data.dia || (!data.ops.length && !(data.spring && data.spring.Y))) {
     app.innerHTML = '<div class="msg"><h1>Wire Part 3D</h1>Scan the QR code on a part report to view the part in 3D.<br>' +
       'สแกน QR บนรายงานชิ้นงานเพื่อดูภาพ 3 มิติ<div style="margin-top:18px;font-size:11px;opacity:.7">link data: ' +
       raw.length + ' chars' + (raw ? ' (' + esc(raw.slice(0, 24)) + '...)' : '') + '</div></div>';
@@ -108,41 +113,116 @@ function main() {
     return add(add(mul(v, c), mul(cross(k, v), s)), mul(k, dot(k, v) * (1 - c)));
   }
 
-  // ---------- turtle: แนวกึ่งกลางลวด (กติกาเดียวกับไฟล์ .wire) ----------
-  var p = [0, 0, 0], t = [1, 0, 0], b = [0, 0, 1];
-  var pts = [p], total = 0, bends = 0;
-  data.ops.forEach(function (op) {
-    if (op.t === "S") {
-      var n = Math.max(1, Math.ceil(op.L / (data.dia * 2)));
-      for (var i = 1; i <= n; i++) pts.push(add(p, mul(t, op.L * i / n)));
-      p = add(p, mul(t, op.L)); total += op.L;
+  var pts, total = 0, bends = 0, rows, title, chip4;
+  if (data.spring && data.spring.Y) {
+    // ---------- สปริง: สร้างรูปทรงจากตัวเลข (กติกาเดียวกับ spring_calc.py) ----------
+    var sp = data.spring, d = data.dia, od = sp.O, dm = od - d, Rr = dm / 2, hand = sp.L ? -1 : 1;
+    var pitchHelix = function (segs, perTurn) {
+      perTurn = perTurn || 40;
+      var tot = 0; segs.forEach(function (q) { tot += q[0]; });
+      var n = Math.max(2, Math.ceil(tot * perTurn) + 1), edges = [0], out = [], z = 0, prevP = null, prevU = 0;
+      segs.forEach(function (q) { edges.push(edges[edges.length - 1] + q[0]); });
+      for (var i = 0; i < n; i++) {
+        var u = tot * i / (n - 1), pch = segs[0][1];
+        for (var k = 1; k < segs.length; k++) {
+          var s0 = Math.min(1, Math.max(0, (u - (edges[k] - 0.25)) / 0.5)); s0 = s0 * s0 * (3 - 2 * s0);
+          pch += (segs[k][1] - segs[k - 1][1]) * s0;
+        }
+        if (prevP !== null) z += (pch + prevP) / 2 * (u - prevU);
+        prevP = pch; prevU = u;
+        var th = 2 * Math.PI * u * hand;
+        out.push([Rr * Math.cos(th), Rr * Math.sin(th), z]);
+      }
+      return out;
+    };
+    var Y = sp.Y, nC = sp.C, info = [["Outer / Inner / Mean dia.", fmt(od, 2) + " / " + fmt(od - 2 * d, 2) + " / " + fmt(dm, 2) + " mm"],
+                                     ["Direction", sp.L ? "Left hand" : "Right hand"]];
+    if (Y === 1) {
+      var ends = ["closed_ground", "closed", "open", "open_ground"][sp.E || 0], lf = sp.F, na, extra = 0;
+      if (ends === "closed_ground") { na = nC - 2; extra = 2 * d; } else if (ends === "closed") { na = nC - 2; extra = 3 * d; }
+      else if (ends === "open_ground") { na = nC - 1; } else { na = nC; extra = d; }
+      var pitch = ends === "open_ground" ? lf / nC : ends === "open" ? (lf - d) / nC : (lf - extra) / na;
+      if (!(pitch >= d)) pitch = d;
+      var segs = ends.indexOf("closed") === 0 ? [[1, d], [na, pitch], [1, d]] : [[nC, pitch]];
+      pts = pitchHelix(segs);
+      if (/ground/.test(ends)) {
+        var z0 = pts[0][2], h = pts[pts.length - 1][2] - z0;
+        pts = pts.map(function (q) { return [q[0], q[1], (q[2] - z0) * (lf - d) / h]; });
+      }
+      title = "Compression spring";
+      info.push(["Total / Active coils", fmt(nC, 2) + " / " + fmt(na, 2)], ["Free length / Pitch", fmt(lf, 2) + " / " + fmt(pitch, 2) + " mm"],
+                ["Ends", ["Closed & ground", "Closed, not ground", "Open", "Open & ground"][sp.E || 0]]);
+    } else if (Y === 2) {
+      var helix = pitchHelix([[nC, d]]), hk = ["full_loop", "half_loop", "extended"][sp.H || 0], ext = sp.X || 0;
+      var loop = function (P, rh, up) {
+        var rise = Rr + (hk === "extended" ? ext : 0), P2 = add(P, mul(up, rise)), c = sub(P2, mul(rh, Rr));
+        var span = hk === "half_loop" ? Math.PI : 2 * Math.PI, m = span > 4 ? 40 : 20, o = [P];
+        for (var i = 1; i <= 5; i++) o.push(add(P, mul(sub(P2, P), i / 5)));
+        for (var j = 1; j <= m; j++) { var a = span * j / m; o.push(add(c, add(mul(rh, Rr * Math.cos(a)), mul(up, Rr * Math.sin(a))))); }
+        return o;
+      };
+      var p0 = helix[0], p1 = helix[helix.length - 1];
+      var h0 = loop(p0, [p0[0] / Rr, p0[1] / Rr, 0], [0, 0, -1]), h1 = loop(p1, [p1[0] / Rr, p1[1] / Rr, 0], [0, 0, 1]);
+      pts = h0.slice().reverse().concat(helix.slice(1, -1), h1);
+      title = "Extension spring";
+      info.push(["Body coils", fmt(nC, 2)], ["Hooks", ["Full loop (machine hook)", "Half loop", "Extended loop +" + fmt(ext, 2) + " mm"][sp.H || 0]]);
     } else {
-      b = rot(b, t, op.roll * Math.PI / 180);
-      var cen = add(p, mul(cross(b, t), op.R)), th = op.ang * Math.PI / 180;
-      var steps = Math.max(6, Math.ceil(op.ang / 5)), r0 = sub(p, cen);
-      for (var k = 1; k <= steps; k++) pts.push(add(cen, rot(r0, b, th * k / steps)));
-      p = pts[pts.length - 1]; t = norm(rot(t, b, th));
-      total += op.R * th; bends++;
+      var hx = pitchHelix([[nC, d]]), L1 = sp.P || 0, L2 = sp.Q || 0;
+      var t0 = norm(sub(hx[1], hx[0])), t1 = norm(sub(hx[hx.length - 1], hx[hx.length - 2]));
+      pts = (L1 > 0 ? [sub(hx[0], mul(t0, L1))] : []).concat(hx, L2 > 0 ? [add(hx[hx.length - 1], mul(t1, L2))] : []);
+      title = "Torsion spring";
+      info.push(["Body coils", fmt(nC, 2)], ["Leg 1 / Leg 2", fmt(L1, 2) + " / " + fmt(L2, 2) + " mm"],
+                ["Angle between legs (free)", fmt((nC % 1) * 360, 0) + "&deg;"]);
     }
-  });
+    // แนวยาวเป็นจุดถี่: ขาที่เป็นเส้นตรงยาวเติมจุดให้ท่อเรียบ
+    var dense = [pts[0]];
+    for (var i = 1; i < pts.length; i++) {
+      var seg = sub(pts[i], pts[i - 1]), L = Math.sqrt(dot(seg, seg)), m = Math.max(1, Math.ceil(L / (d * 2)));
+      for (var j = 1; j <= m; j++) dense.push(add(pts[i - 1], mul(seg, j / m)));
+    }
+    pts = dense;
+    total = sp.W || 0;
+    chip4 = '<span class="chip">Coils <b>' + fmt(nC, 2) + '</b></span>';
+    rows = { head: "Specification (" + title + ")", html: '<tr><th>Item</th><th>Value</th></tr>' +
+      info.map(function (r) { return "<tr><td>" + r[0] + "</td><td>" + r[1] + "</td></tr>"; }).join("") };
+  } else {
+    // ---------- turtle: แนวกึ่งกลางลวด (กติกาเดียวกับไฟล์ .wire) ----------
+    var p = [0, 0, 0], t = [1, 0, 0], b = [0, 0, 1];
+    pts = [p];
+    data.ops.forEach(function (op) {
+      if (op.t === "S") {
+        var n = Math.max(1, Math.ceil(op.L / (data.dia * 2)));
+        for (var i = 1; i <= n; i++) pts.push(add(p, mul(t, op.L * i / n)));
+        p = add(p, mul(t, op.L)); total += op.L;
+      } else {
+        b = rot(b, t, op.roll * Math.PI / 180);
+        var cen = add(p, mul(cross(b, t), op.R)), th = op.ang * Math.PI / 180;
+        var steps = Math.max(6, Math.ceil(op.ang / 5)), r0 = sub(p, cen);
+        for (var k = 1; k <= steps; k++) pts.push(add(cen, rot(r0, b, th * k / steps)));
+        p = pts[pts.length - 1]; t = norm(rot(t, b, th));
+        total += op.R * th; bends++;
+      }
+    });
+    chip4 = '<span class="chip">Bends <b>' + bends + '</b></span>';
+    rows = { head: "Forming sequence (" + data.ops.length + ")", html: "<tr><th>#</th><th>Element</th><th>Length / Angle</th></tr>" +
+      data.ops.map(function (op, i) {
+        return "<tr><td class='n'>" + (i + 1) + "</td><td>" + (op.t === "S" ? "Straight" : "Bend") + "</td><td>" +
+          (op.t === "S" ? fmt(op.L, 2) + " mm" : fmt(op.ang, 1) + "&deg; (R" + fmt(op.R, 2) + ")" +
+            (op.roll ? " &nbsp;<span style='color:#6b7280'>rot " + fmt(op.roll, 1) + "&deg;</span>" : "")) + "</td></tr>";
+      }).join("") };
+  }
   var w = data.weight;
 
   // ---------- หน้าจอ ----------
-  var rows = data.ops.map(function (op, i) {
-    return "<tr><td class='n'>" + (i + 1) + "</td><td>" + (op.t === "S" ? "Straight" : "Bend") + "</td><td>" +
-      (op.t === "S" ? fmt(op.L, 2) + " mm" : fmt(op.ang, 1) + "&deg; (R" + fmt(op.R, 2) + ")" +
-        (op.roll ? " &nbsp;<span style='color:#6b7280'>rot " + fmt(op.roll, 1) + "&deg;</span>" : "")) + "</td></tr>";
-  }).join("");
   app.innerHTML =
     '<header class="pad"><div class="lbl">PART NO</div><div class="pn">' + esc(data.name || "-") + '</div></header>' +
     '<div class="chips pad"><span class="chip">Wire <b>&Oslash;' + fmt(data.dia, 2) + ' mm</b></span>' +
-    '<span class="chip">Length <b>' + fmt(total, 2) + ' mm</b></span>' +
-    (w != null ? '<span class="chip">Weight <b>' + fmt(w, 2) + ' g</b></span>' : "") +
-    '<span class="chip">Bends <b>' + bends + '</b></span></div>' +
+    (total ? '<span class="chip">Length <b>' + fmt(total, 2) + ' mm</b></span>' : "") +
+    (w != null ? '<span class="chip">Weight <b>' + fmt(w, 2) + ' g</b></span>' : "") + chip4 + '</div>' +
     '<div id="view"><canvas id="cv"></canvas><div class="hint">Drag to rotate &middot; pinch to zoom</div>' +
     '<div class="tools"><button id="spin">Auto-rotate</button><button id="reset">Reset</button></div></div>' +
-    '<details><summary class="pad">Forming sequence (' + data.ops.length + ')</summary><div class="tbl"><table><tr><th>#</th><th>Element</th><th>Length / Angle</th></tr>' +
-    rows + '</table></div><div class="note pad">Data comes from the link in the QR code and stays on this phone. ' +
+    '<details><summary class="pad">' + rows.head + '</summary><div class="tbl"><table>' +
+    rows.html + '</table></div><div class="note pad">Data comes from the link in the QR code and stays on this phone. ' +
     'ข้อมูลอยู่ในลิงก์ของ QR ไม่ได้ส่งไปที่เซิร์ฟเวอร์</div></details>';
 
   var view = document.getElementById("view"), cv = document.getElementById("cv");
