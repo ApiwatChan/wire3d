@@ -49,6 +49,14 @@
   td.n { color:var(--grey); width:40px; }
   .msg { padding:40px 24px; text-align:center; color:var(--grey); line-height:1.6; }
   .msg h1 { color:var(--head); font-size:20px; }
+  tr.st { cursor:pointer; -webkit-tap-highlight-color:transparent; }
+  tr.st:hover td { background:var(--row); }
+  tr.st.sel td { background:#fff3d6; color:#7a4a00; font-weight:600; }
+  :root[data-theme="dark"] tr.st.sel td { background:#4a3612; color:#ffd890; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) tr.st.sel td { background:#4a3612; color:#ffd890; } }
+  .badge { position:absolute; left:max(10px, env(safe-area-inset-left, 0px)); top:10px; max-width:80%; background:#f5a60f; color:#2b1a00;
+    font-size:13px; font-weight:700; border-radius:10px; padding:6px 11px; box-shadow:0 1px 4px #0003; }
+  .badge[hidden] { display:none; }
   .note { font-size:11px; color:var(--grey); padding-block:8px 12px; }
 </style>
 </head>
@@ -139,25 +147,42 @@ function main() {
   }
 
   // ปลายสปริงจากลำดับดัด (กติกาเดียวกับ spring_calc._Turtle): เริ่มที่ปลายขด ทิศสัมผัส, ระนาบอ้างอิง = แกนสปริงชี้ออก
-  function endTurtle(P, atEnd, axisOut, ops) {
+  var steps = [], ptTag = null;       // steps = ขั้นตอนที่แตะไฮไลต์ได้ (ลำดับดัดของลวด / ปลายสปริง), ptTag = ขั้นของแต่ละจุด (-1 = ตัวขด)
+  function endTurtle(P, atEnd, axisOut, ops, grp) {
     var p = atEnd ? P[P.length - 1] : P[0], t = norm(atEnd ? sub(P[P.length - 1], P[P.length - 2]) : sub(P[0], P[1]));
     var b = norm(sub(axisOut, mul(t, dot(axisOut, t)))), out = [];
-    (ops || []).forEach(function (op) {
-      if (op.t === "S") { p = add(p, mul(t, op.L)); out.push(p); return; }
+    out.tags = [];
+    (ops || []).forEach(function (op, oi) {
+      var sid = steps.length;
+      steps.push({ grp: grp, num: oi + 1, op: op });
+      if (op.t === "S") { p = add(p, mul(t, op.L)); out.push(p); out.tags.push(sid); return; }
       b = rot(b, t, op.roll * Math.PI / 180);
       var cen = add(p, mul(cross(b, t), op.R)), th = op.ang * Math.PI / 180, r0 = sub(p, cen);
-      var steps = Math.max(6, Math.ceil(op.ang / 5));
-      for (var k = 1; k <= steps; k++) out.push(add(cen, rot(r0, b, th * k / steps)));
+      var nst = Math.max(6, Math.ceil(op.ang / 5));
+      for (var k = 1; k <= nst; k++) { out.push(add(cen, rot(r0, b, th * k / nst))); out.tags.push(sid); }
       p = out[out.length - 1]; t = norm(rot(t, b, th));
     });
     return out;
   }
   function withEnds(P) {
     if (!data.eops) return null;
-    var e0 = endTurtle(P, false, [0, 0, -1], data.eops[1]), e1 = endTurtle(P, true, [0, 0, 1], data.eops[2]);
+    steps = [];
+    var e0 = endTurtle(P, false, [0, 0, -1], data.eops[1], "End 1"), e1 = endTurtle(P, true, [0, 0, 1], data.eops[2], "End 2");
+    var bodyTags = P.map(function () { return -1; });
+    ptTag = e0.tags.slice().reverse().concat(bodyTags, e1.tags);
     return e0.slice().reverse().concat(P, e1);
   }
+  var segTag = [];                    // ขั้นของแต่ละท่อนระหว่างจุด i และ i+1
+  function stepText(op) {
+    return op.t === "S" ? "Straight " + fmt(op.L, 2) + " mm" : "Bend " + fmt(op.ang, 1) + "\u00B0 (R" + fmt(op.R, 2) + ")" + (op.roll ? " rot " + fmt(op.roll, 1) + "\u00B0" : "");
+  }
 
+  function stepRow(s, sid) {
+    var op = s.op;
+    return "<tr class='st' data-s='" + sid + "'><td class='n'>" + (s.grp ? s.grp.replace("End ", "E") + "." : "") + s.num + "</td><td>" + (op.t === "S" ? "Straight" : "Bend") + "</td><td>" +
+      (op.t === "S" ? fmt(op.L, 2) + " mm" : fmt(op.ang, 1) + "&deg; (R" + fmt(op.R, 2) + ")" +
+        (op.roll ? " &nbsp;<span style='color:#6b7280'>rot " + fmt(op.roll, 1) + "&deg;</span>" : "")) + "</td></tr>";
+  }
   var pts, total = 0, bends = 0, rows, title, chip4, clipH = null;
   if (data.spring && data.spring.Y) {
     // ---------- สปริง: สร้างรูปทรงจากตัวเลข (กติกาเดียวกับ spring_calc.py) ----------
@@ -225,18 +250,25 @@ function main() {
     var dense = [pts[0]];
     for (var i = 1; i < pts.length; i++) {
       var seg = sub(pts[i], pts[i - 1]), L = Math.sqrt(dot(seg, seg)), m = Math.max(1, Math.ceil(L / (d * 2)));
-      for (var j = 1; j <= m; j++) dense.push(add(pts[i - 1], mul(seg, j / m)));
+      var stg = (ptTag && ptTag.length === pts.length) ? Math.max(ptTag[i - 1], ptTag[i]) : -1;
+      for (var j = 1; j <= m; j++) { dense.push(add(pts[i - 1], mul(seg, j / m))); segTag.push(stg); }
     }
     pts = dense;
     total = sp.W || 0;
     chip4 = '<span class="chip">Coils <b>' + fmt(nC, 2) + '</b></span>';
     rows = { head: "Specification (" + title + ")", html: '<tr><th>Item</th><th>Value</th></tr>' +
       info.map(function (r) { return "<tr><td>" + r[0] + "</td><td>" + r[1] + "</td></tr>"; }).join("") };
+    if (steps.length) {
+      rows.head = rows.head + " \u00B7 tap a step to highlight";
+      rows.html += "<tr><th>#</th><th>Hook / leg forming sequence</th><th>Length / Angle</th></tr>" + steps.map(stepRow).join("");
+    }
   } else {
     // ---------- turtle: แนวกึ่งกลางลวด (กติกาเดียวกับไฟล์ .wire) ----------
     var p = [0, 0, 0], t = [1, 0, 0], b = [0, 0, 1];
     pts = [p];
-    data.ops.forEach(function (op) {
+    data.ops.forEach(function (op, oi) {
+      var before = pts.length;
+      steps.push({ grp: "", num: oi + 1, op: op });
       if (op.t === "S") {
         var n = Math.max(1, Math.ceil(op.L / (data.dia * 2)));
         for (var i = 1; i <= n; i++) pts.push(add(p, mul(t, op.L * i / n)));
@@ -244,21 +276,19 @@ function main() {
       } else {
         b = rot(b, t, op.roll * Math.PI / 180);
         var cen = add(p, mul(cross(b, t), op.R)), th = op.ang * Math.PI / 180;
-        var steps = Math.max(6, Math.ceil(op.ang / 5)), r0 = sub(p, cen);
-        for (var k = 1; k <= steps; k++) pts.push(add(cen, rot(r0, b, th * k / steps)));
+        var nst = Math.max(6, Math.ceil(op.ang / 5)), r0 = sub(p, cen);
+        for (var k = 1; k <= nst; k++) pts.push(add(cen, rot(r0, b, th * k / nst)));
         p = pts[pts.length - 1]; t = norm(rot(t, b, th));
         total += op.R * th; bends++;
       }
+      for (var q2 = before; q2 < pts.length; q2++) segTag.push(oi);
     });
     chip4 = '<span class="chip">Bends <b>' + bends + '</b></span>';
-    rows = { head: "Forming sequence (" + data.ops.length + ")", html: "<tr><th>#</th><th>Element</th><th>Length / Angle</th></tr>" +
-      data.ops.map(function (op, i) {
-        return "<tr><td class='n'>" + (i + 1) + "</td><td>" + (op.t === "S" ? "Straight" : "Bend") + "</td><td>" +
-          (op.t === "S" ? fmt(op.L, 2) + " mm" : fmt(op.ang, 1) + "&deg; (R" + fmt(op.R, 2) + ")" +
-            (op.roll ? " &nbsp;<span style='color:#6b7280'>rot " + fmt(op.roll, 1) + "&deg;</span>" : "")) + "</td></tr>";
-      }).join("") };
+    rows = { head: "Forming sequence (" + data.ops.length + ") \u00B7 tap a step to highlight", html: "<tr><th>#</th><th>Element</th><th>Length / Angle</th></tr>" +
+      steps.map(stepRow).join("") };
   }
   var w = data.weight;
+  if (segTag.length !== pts.length - 1) { segTag = []; steps = []; }   // กันข้อมูลไม่ตรง: ปิดไฮไลต์
 
   // ---------- หน้าจอ ----------
   app.innerHTML =
@@ -266,7 +296,7 @@ function main() {
     '<div class="chips pad"><span class="chip">Wire <b>&Oslash;' + fmt(data.dia, 2) + ' mm</b></span>' +
     (total ? '<span class="chip">Length <b>' + fmt(total, 2) + ' mm</b></span>' : "") +
     (w != null ? '<span class="chip">Weight <b>' + fmt(w, 2) + ' g</b></span>' : "") + chip4 + '</div>' +
-    '<div id="view"><canvas id="cv"></canvas><div class="hint">Drag to rotate &middot; pinch to zoom</div>' +
+    '<div id="view"><canvas id="cv"></canvas><div class="badge" id="badge" hidden></div><div class="hint">Drag to rotate &middot; pinch to zoom</div>' +
     '<div class="tools"><button id="spin">Auto-rotate</button><button id="reset">Reset</button></div></div>' +
     '<details><summary class="pad">' + rows.head + '</summary><div class="tbl"><table>' +
     rows.html + '</table></div><div class="note pad">Data comes from the link in the QR code and stays on this phone. ' +
@@ -322,7 +352,7 @@ function main() {
     "void main(){ vec4 v = uM * vec4(aP,1.0); vN = mat3(uM) * aN; vV = -v.xyz; vZ = aP.z; gl_Position = uP * v; }"));
   gl.attachShader(prog, shader(gl.FRAGMENT_SHADER,
     "precision mediump float; varying vec3 vN; varying vec3 vV; varying float vZ;" +
-    "uniform float uClip; uniform float uLo; uniform float uHi; uniform vec3 uCapLo; uniform vec3 uCapHi;" +
+    "uniform float uMode; uniform float uClip; uniform float uLo; uniform float uHi; uniform vec3 uCapLo; uniform vec3 uCapHi;" +
     "void main(){ if (uClip > 0.5 && (vZ < uLo || vZ > uHi)) discard;" +
     " vec3 n = normalize(vN); vec3 v = normalize(vV); float cap = 0.0;" +
     " if (dot(n,v) < 0.0) { if (uClip > 0.5) { cap = 1.0; n = (vZ - uLo < uHi - vZ) ? uCapLo : uCapHi; } else { n = -n; } }" +
@@ -331,7 +361,10 @@ function main() {
     " float sp = pow(max(dot(n, normalize(L1+v)),0.0), 48.0)*0.55 + pow(max(dot(n, normalize(L2+v)),0.0), 24.0)*0.15;" +
     " vec3 col = vec3(0.78,0.80,0.84)*d + vec3(sp);" +
     " if (cap > 0.5) col = vec3(0.925,0.94,0.97) * (0.55 + 0.45*abs(n.z));" +
-    " gl_FragColor = vec4(min(col,vec3(1.0)),1.0); }"));
+    " float al = 1.0;" +
+    " if (uMode > 0.5 && uMode < 1.5) { col = vec3(1.0,0.70,0.10)*(0.45+0.75*d) + vec3(sp)*0.6; }" +
+    " if (uMode > 1.5) { al = 0.28; }" +
+    " gl_FragColor = vec4(min(col,vec3(1.0)), al); }"));
   gl.linkProgram(prog); gl.useProgram(prog);
   function buf(target, arr) { var bb = gl.createBuffer(); gl.bindBuffer(target, bb); gl.bufferData(target, arr, gl.STATIC_DRAW); return bb; }
   buf(gl.ARRAY_BUFFER, new Float32Array(pos));
@@ -341,13 +374,13 @@ function main() {
   buf(gl.ELEMENT_ARRAY_BUFFER, big ? new Uint32Array(idx) : new Uint16Array(idx));
   var uM = gl.getUniformLocation(prog, "uM"), uP = gl.getUniformLocation(prog, "uP");
   var uClip = gl.getUniformLocation(prog, "uClip"), uLo = gl.getUniformLocation(prog, "uLo"), uHi = gl.getUniformLocation(prog, "uHi");
-  var uCapLo = gl.getUniformLocation(prog, "uCapLo"), uCapHi = gl.getUniformLocation(prog, "uCapHi");
+  var uMode = gl.getUniformLocation(prog, "uMode"), uCapLo = gl.getUniformLocation(prog, "uCapLo"), uCapHi = gl.getUniformLocation(prog, "uCapHi");
   gl.uniform1f(uClip, clipH !== null ? 1 : 0);
   if (clipH !== null) { gl.uniform1f(uLo, 0 - ctr[2]); gl.uniform1f(uHi, clipH - ctr[2]); }
   gl.enable(gl.DEPTH_TEST); gl.clearColor(0, 0, 0, 0);
 
   // ---------- กล้อง / หมุน / ซูม ----------
-  var R3, zoom, spin = false;
+  var R3, zoom, spin = false, spinBtn = document.getElementById("spin");
   function axisRot(ax, a) {
     var c = Math.cos(a), s = Math.sin(a), x = ax[0], y = ax[1], z = ax[2], C = 1 - c;
     return [x*x*C+c, x*y*C-z*s, x*z*C+y*s, y*x*C+z*s, y*y*C+c, y*z*C-x*s, z*x*C-y*s, z*y*C+x*s, z*z*C+c];
@@ -373,8 +406,46 @@ function main() {
     var R = R3;
     gl.uniformMatrix4fv(uM, false, [R[0], R[3], R[6], 0, R[1], R[4], R[7], 0, R[2], R[5], R[8], 0, 0, 0, -dist, 1]);
     gl.uniform3f(uCapLo, -R[2], -R[5], -R[8]); gl.uniform3f(uCapHi, R[2], R[5], R[8]);
-    gl.drawElements(gl.TRIANGLES, idx.length, big ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT, 0);
+    var it = big ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT, bs = big ? 4 : 2;
+    if (sel < 0) { gl.uniform1f(uMode, 0); gl.drawElements(gl.TRIANGLES, idx.length, it, 0); return; }
+    gl.disable(gl.BLEND); gl.depthMask(true);
+    gl.uniform1f(uMode, 1);
+    items.forEach(function (q) { if (q[2] === 1) gl.drawElements(gl.TRIANGLES, q[1], it, q[0] * bs); });
+    gl.enable(gl.BLEND); gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
+    gl.uniform1f(uMode, 2);
+    items.forEach(function (q) { if (q[2] === 2) gl.drawElements(gl.TRIANGLES, q[1], it, q[0] * bs); });
+    gl.depthMask(true); gl.disable(gl.BLEND);
   }
+  // ---------- ไฮไลต์ขั้นตอน: แตะแถวในตาราง = ท่อนนั้นสีเหลืองส้ม ส่วนอื่นจาง แตะซ้ำ = ยกเลิก ----------
+  var sel = -1, items = [], badge = document.getElementById("badge");
+  function buildItems() {
+    items = [];
+    var per = sides * 6, ns = N - 1, i = 0;
+    while (i < ns) {
+      var st = segTag[i] === sel ? 1 : 2, j = i;
+      while (j < ns && (segTag[j] === sel ? 1 : 2) === st) j++;
+      items.push([i * per, (j - i) * per, st]);
+      i = j;
+    }
+    var capOff = ns * per, cn = sides * 3;
+    items.push([capOff, cn, segTag[0] === sel ? 1 : 2], [capOff + cn, cn, segTag[ns - 1] === sel ? 1 : 2]);
+  }
+  function select(s) {
+    sel = (s === sel || s < 0 || s >= steps.length) ? -1 : s;
+    if (sel >= 0) { spin = false; spinBtn.textContent = "Auto-rotate"; buildItems(); }
+    var trs = document.querySelectorAll("tr.st");
+    for (var k = 0; k < trs.length; k++) trs[k].classList.toggle("sel", +trs[k].getAttribute("data-s") === sel);
+    if (sel >= 0) {
+      var s0 = steps[sel];
+      badge.textContent = "Step " + (s0.grp ? s0.grp + "." : "") + s0.num + " \u00B7 " + stepText(s0.op);
+      badge.hidden = false;
+    } else badge.hidden = true;
+    draw();
+  }
+  document.querySelector("details").addEventListener("click", function (e) {
+    var tr = e.target.closest ? e.target.closest("tr.st") : null;
+    if (tr) select(+tr.getAttribute("data-s"));
+  });
   function resize() {
     var dpr = Math.min(window.devicePixelRatio || 1, 2);
     cv.width = Math.max(1, Math.round(view.clientWidth * dpr)); cv.height = Math.max(1, Math.round(view.clientHeight * dpr));
@@ -404,7 +475,6 @@ function main() {
   cv.addEventListener("dblclick", function () { home(); draw(); });
   window.addEventListener("resize", resize);
   document.getElementById("reset").onclick = function () { home(); draw(); };
-  var spinBtn = document.getElementById("spin");
   spinBtn.onclick = function () { spin = !spin; spinBtn.textContent = spin ? "Stop" : "Auto-rotate"; if (spin) loop(); };
   function loop() { if (!spin) return; R3 = m3(axisRot([0, 1, 0], 0.012), R3); draw(); requestAnimationFrame(loop); }
   resize();
